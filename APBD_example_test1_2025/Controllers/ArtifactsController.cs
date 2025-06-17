@@ -10,6 +10,7 @@ namespace APBD_example_test1_2025.Controllers
     public class ArtifactsController : ControllerBase
     {
         private readonly IDbService _dbService;
+
         public ArtifactsController(IDbService dbService)
         {
             _dbService = dbService;
@@ -20,31 +21,28 @@ namespace APBD_example_test1_2025.Controllers
         {
             try
             {
-                var result = await _dbService.GetProjectByIdAsync(id);
+                var result = await _dbService.GetProjectsAsync(id);
                 return Ok(result);
             }
             catch (Exception ex)
             {
                 return NotFound(ex.Message);
             }
+        }
 
-            [HttpPost]
-            public async Task<IActionResult> AddArtifactWithProject(CreateNewArtifactDto dto)
+        [HttpPost]
+        public async Task<IActionResult> AddArtifactWithProject(int artifactId,
+            CreateNewArtifactDto createNewArtifactDto)
+        {
+            try 
             {
-                if (dto.Artifact == null || dto.Project == null)
-                {
-                    return BadRequest("Artifact and project data are required.");
-                }
-
-                try
-                {
-                    await _dbService.AddNewArtifactWithProjectAsync(dto);
-                }
-                catch (Exception ex)
-                {
-                    return Conflict(ex.Message); // Można też rozdzielić Conflict / NotFound itd.
-                }
-
-                return CreatedAtAction(nameof(GetProject), new { id = dto.Project.ProjectId }, dto);
+                await _dbService.AddNewArtifactWithProjectAsync(artifactId, createNewArtifactDto); 
             }
+            catch (Exception ex)
+            {
+                return Conflict(ex.Message);
+            }
+            return CreatedAtAction(nameof(GetProject), artifactId, createNewArtifactDto);
+        }
+    }
 }
