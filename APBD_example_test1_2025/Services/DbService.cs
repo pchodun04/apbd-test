@@ -13,144 +13,129 @@ public class DbService : IDbService
         _connectionString = configuration.GetConnectionString("Default") ?? string.Empty;
     }
     
-    public async Task<CustomerRentalHistoryDto> GetRentalsForCustomerByIdAsync(int customerId)
+    public async Task<PreservationProjectHistoryDto> GetProjectsAsync(int projectId)
     {
-        var query =
-            @"SELECT first_name, last_name, r.rental_id, rental_date, return_date, s.name, ri.price_at_rental, m.title
-            FROM Rental r
-            JOIN Customer c ON r.customer_id = c.customer_id
-            JOIN Status s ON r.status_id = s.status_id
-            JOIN Rental_Item ri ON ri.rental_id = r.rental_id
-            JOIN Movie m ON m.movie_id = ri.movie_id
-            WHERE r.customer_id = @customerId;";
+        var query =    @"SELECT p.project_id, p.objective, p.start_date, p.end_date,
+            a.name AS artifact_name, a.origin_date, 
+            i.institution_id, i.name AS institution_name, i.founded_year,
+            s.first_name, s.last_name, s.hire_date, pa.role
+            FROM Project p
+            JOIN Artifact a ON p.artifact_id = a.artifact_id
+            JOIN Institution i ON a.institution_id = i.institution_id
+            LEFT JOIN ProjectAssignment pa ON pa.project_id = p.project_id
+            LEFT JOIN Staff s ON s.staff_id = pa.staff_id
+            WHERE p.project_id = @id";
         
-        await using SqlConnection connection = new SqlConnection(_connectionString);
-        await using SqlCommand command = new SqlCommand();
-        
+        await using var connection = new SqlConnection(_connectionString);
+        await using var command = new SqlCommand();
+
         command.Connection = connection;
         command.CommandText = query;
+        
+
+        command.Parameters.AddWithValue("@id", projectId);
+
         await connection.OpenAsync();
-        
-        command.Parameters.AddWithValue("@customerId", customerId);
         var reader = await command.ExecuteReaderAsync();
-        
-        CustomerRentalHistoryDto? rentals = null;
-        
+
+        PreservationProjectHistoryDto? result = null;
+
         while (await reader.ReadAsync())
         {
-            if (rentals is null)
+            if (result == null)
             {
-                rentals = new CustomerRentalHistoryDto
+                result = new PreservationProjectHistoryDto
                 {
-                    FirstName = reader.GetString(0),
-                    LastName = reader.GetString(1),
-                    Rentals = new List<RentalDetailsDto>()
+                    ProjectId = reader.GetInt32(0),
+                    Objective = reader.GetString(1),
+                    StartDate = reader.GetDateTime(2),
+                    EndDate = reader.IsDBNull(3) ? null : reader.GetDateTime(3),
+                    Artifact = new ArtifactDto
+                    {
+                        Name = reader.GetString(4),
+                        OriginDate = reader.GetDateTime(5),
+                        Institution = new InstitutionDto
+                        {
+                            InstitutionId = reader.GetInt32(6),
+                            Name = reader.GetString(7),
+                            FoundedYear = reader.GetInt32(8)
+                        }
+                    },
+                    StaffAssignments = new List<StaffAssignmentDto>()
                 };
             }
-            
-            int rentalId = reader.GetInt32(2);
-            
-            var rental = rentals.Rentals.FirstOrDefault(e => e.Id.Equals(rentalId));
-            if (rental is null)
+
+            if (!reader.IsDBNull(9))
             {
-                rental = new RentalDetailsDto()
+                result.StaffAssignments.Add(new StaffAssignmentDto
                 {
-                    Id = rentalId,
-                    RentalDate = reader.GetDateTime(3),
-                    ReturnDate = await reader.IsDBNullAsync(4) ? null : reader.GetDateTime(4),
-                    Status = reader.GetString(5),
-                    Movies = new List<RentedMovieDto>()
-                };
-                rentals.Rentals.Add(rental);
+                    FirstName = reader.GetString(9),
+                    LastName = reader.GetString(10),
+                    HireDate = reader.GetDateTime(11),
+                    Role = reader.GetString(12)
+                });
             }
-            rental.Movies.Add(new RentedMovieDto()
-            {
-                Title = reader.GetString(7),
-                PriceAtRental = reader.GetDecimal(6),
-            });
-            
-        }       
-        
-        if (rentals is null)
-        {
-            throw new NotFoundException("No rentals found for the specified customer.");
         }
-        
-        return rentals;
+
+        if (result == null)
+        {
+            throw new Exception("Project not found");
+        }
+
+        return result;
     }
 
-    public async Task AddNewRentalAsync(int customerId, CreateRentalRequestDto rentalRequest)
+    public async Task AddNewArtifactWithProjectAsync(int artifactId, CreateNewArtifactDto dto)
+{
+    await using SqlConnection connection = new SqlConnection(_connectionString);
+    await using SqlCommand command = new SqlCommand();
+
+    command.Connection = connection;
+    await connection.OpenAsync();
+
+    DbTransaction transaction = await connection.BeginTransactionAsync();
+    command.Transaction = transaction as SqlTransaction;
+
+    try
     {
-        await using SqlConnection connection = new SqlConnection(_connectionString);
-        await using SqlCommand command = new SqlCommand();
-        
-        command.Connection = connection;
-        await connection.OpenAsync();
-        
-        DbTransaction transaction = await connection.BeginTransactionAsync();
-        command.Transaction = transaction as SqlTransaction;
+        command.Parameters.Clear();
+        command.CommandText = "SELECT 1 FROM Institution WHERE institution_id = @InstitutionId";
+        command.Parameters.AddWithValue("@InstitutionId", artifactId);
 
-        try
-        {
-            command.Parameters.Clear();
-            command.CommandText = "SELECT 1 FROM Customer WHERE customer_id = @IdCustomer;";
-            command.Parameters.AddWithValue("@IdCustomer", customerId);
-                
-            var customerIdRes = await command.ExecuteScalarAsync();
-            if(customerIdRes is null)
-                throw new NotFoundException($"Customer with ID - {customerId} - not found.");
-            
-            command.Parameters.Clear();
-            command.CommandText = 
-                @"INSERT INTO Rental
-            VALUES(@IdRental, @RentalDate, @ReturnDate, @CustomerId, @StatusId);";
+        var exists = await command.ExecuteScalarAsync();
+        if (exists is null)
+            throw new Exception($"Institution with ID {artifactId} not found");
         
-            command.Parameters.AddWithValue("@IdRental", rentalRequest.Id);
-            command.Parameters.AddWithValue("@RentalDate", rentalRequest.RentalDate);
-            command.Parameters.AddWithValue("@ReturnDate", DBNull.Value);
-            command.Parameters.AddWithValue("@CustomerId", customerId);
-            command.Parameters.AddWithValue("@StatusId", 1);
+        command.Parameters.Clear();
+        command.CommandText = @"INSERT INTO Artifact (artifact_id, name, origin_date, institution_id)
+                                VALUES (@ArtifactId, @Name, @OriginDate, @InstitutionId)";
 
-            try
-            {
-                await command.ExecuteNonQueryAsync();
-            }
-            catch (Exception e)
-            {
-                throw new ConflictException("A rental with the same ID already exists.");
-            }
-            
+        command.Parameters.AddWithValue("@ArtifactId", dto.NewArtifactDto.ArtifactId);
+        command.Parameters.AddWithValue("@Name", dto.NewArtifactDto.Name);
+        command.Parameters.AddWithValue("@OriginDate", dto.NewArtifactDto.OriginDate);
+        command.Parameters.AddWithValue("@InstitutionId", dto.NewArtifactDto.InstitutionId);
 
-            foreach (var movie in rentalRequest.Movies)
-            {
-                command.Parameters.Clear();
-                command.CommandText = "SELECT movie_id FROM Movie WHERE Title = @MovieTitle;";
-                command.Parameters.AddWithValue("@MovieTitle", movie.Title);
-                
-                var movieId = await command.ExecuteScalarAsync();
-                if(movieId is null)
-                    throw new NotFoundException($"Movie - {movie.Title} - not found.");
-                
-                command.Parameters.Clear();
-                command.CommandText = 
-                    @"INSERT INTO Rental_Item
-                        VALUES(@IdRental, @MovieId, @RentalPrice);";
+        await command.ExecuteNonQueryAsync();
         
-                command.Parameters.AddWithValue("@IdRental", rentalRequest.Id);
-                command.Parameters.AddWithValue("@MovieId", movieId);
-                command.Parameters.AddWithValue("@RentalPrice", movie.RentalPrice);
-                
-                await command.ExecuteNonQueryAsync();
-            }
-            
-            await transaction.CommitAsync();
-        }
-        catch (Exception e)
-        {
-            await transaction.RollbackAsync();
-            throw;
-        }
-        
+        command.Parameters.Clear();
+        command.CommandText = @"INSERT INTO Project (project_id, objective, start_date, end_date, artifact_id)
+                                VALUES (@ProjectId, @Objective, @StartDate, @EndDate, @ArtifactId)";
 
+        command.Parameters.AddWithValue("@ProjectId", dto.NewProjectDto.ProjectId);
+        command.Parameters.AddWithValue("@Objective", dto.NewProjectDto.Objective);
+        command.Parameters.AddWithValue("@StartDate", dto.NewProjectDto.StartDate);
+        command.Parameters.AddWithValue("@EndDate", (object?)dto.NewProjectDto.EndDate ?? DBNull.Value);
+        command.Parameters.AddWithValue("@ArtifactId", dto.NewArtifactDto.ArtifactId);
+
+        await command.ExecuteNonQueryAsync();
+
+        await transaction.CommitAsync();
     }
+    catch
+    {
+        await transaction.RollbackAsync();
+        throw;
+    }
+}
+
 }
